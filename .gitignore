@@ -208,3 +208,11 @@ __marimo__/
 
 # Data files
 data/
+*.png
+*.csv
+
+# Profile files
+*.prof
+
+# VSCode
+.vscode/
