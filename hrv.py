@@ -57,14 +57,16 @@ def process_video(path):
     output_path = f"output/{path.split('/')[-1].split('.')[0]}"
     os.makedirs(output_path, exist_ok=True)
 
-    if os.path.exists(f'{output_path}/rgb.csv'):
+    if os.path.exists(f'{output_path}/rgb.csv') and os.path.exists(f'{output_path}/yuv.csv'):
         print(f"Skipping {path}, already processed.")
         rgb = np.loadtxt(f'{output_path}/rgb.csv', delimiter=',', skiprows=1)
+        yuv = np.loadtxt(f'{output_path}/yuv.csv', delimiter=',', skiprows=1)
         fps = get_fps(path)
     else:
-        rgb, fps = extract_avg_rgb(path)
+        rgb, yuv, fps = extract_avg_rgb(path)
 
     save_csv(f'{output_path}/rgb.csv', rgb, header=['Blue', 'Green', 'Red'])
+    save_csv(f'{output_path}/yuv.csv', yuv, header=['Y', 'U', 'V'])
 
     rgb_ma = magnify_colour_ma(
         np.array(rgb, dtype=np.float64),
@@ -72,15 +74,26 @@ def process_video(path):
         n_bg_ma=90,
         n_smooth_ma=6
         )
+    yuv_ma = magnify_colour_ma(
+        np.array(yuv, dtype=np.float64),
+        delta=1,
+        n_bg_ma=90,
+        n_smooth_ma=6
+        )
 
     rgb_ma_filtered = filter_signal(rgb_ma, fps)
-    peaks = detect_beats(rgb_ma_filtered[..., 1], fps)
-    rr_intervals = compute_rr(peaks, fps)
+    rgb_peaks = detect_beats(rgb_ma_filtered[..., 1], fps)
+    rgb_rr_intervals = compute_rr(rgb_peaks, fps)
+    yuv_ma_filtered = filter_signal(yuv_ma, fps)
+    yuv_peaks = detect_beats(yuv_ma_filtered[..., 0], fps)
+    yuv_rr_intervals = compute_rr(yuv_peaks, fps)
     
-    sdnn, rmssd = compute_hrv_metrics(rr_intervals)
-    print(f"SDNN: {sdnn:.2f} ms, RMSSD: {rmssd:.2f} ms")
+    sdnn, rmssd = compute_hrv_metrics(rgb_rr_intervals)
+    print(f"RGB: \nSDNN: {sdnn:.2f} ms, RMSSD: {rmssd:.2f} ms")
+    sdnn, rmssd = compute_hrv_metrics(yuv_rr_intervals)
+    print(f"YUV: \nSDNN: {sdnn:.2f} ms, RMSSD: {rmssd:.2f} ms")
 
-    sdnn_values, rmssd_values = sliding_window_hrv(rr_intervals)
+    sdnn_values, rmssd_values = sliding_window_hrv(rgb_rr_intervals)
     create_plot(None,
                 sdnn_values,
                 'Sliding Window SDNN',
@@ -95,14 +108,37 @@ def process_video(path):
                 'RMSSD (ms)',
                 ['RMSSD'],
                 f'{output_path}/sliding_window_rmssd.png')
+    
+    sdnn_values, rmssd_values = sliding_window_hrv(yuv_rr_intervals)
+    create_plot(None,
+                sdnn_values,
+                'Sliding Window SDNN YUV',
+                'Window',
+                'SDNN (ms)',
+                ['SDNN'],
+                f'{output_path}/sliding_window_sdnn_yuv.png')
+    create_plot(None,
+                rmssd_values,
+                'Sliding Window RMSSD YUV',
+                'Window',
+                'RMSSD (ms)',
+                ['RMSSD'],
+                f'{output_path}/sliding_window_rmssd_yuv.png')
 
     create_plot(None, 
                 rgb,
-                'Average RGB', 
+                'RGB', 
                 'Frame', 
                 'Intensity', 
                 ['Blue', 'Green', 'Red'], 
                 f'{output_path}/rgb.png')
+    create_plot(None, 
+                yuv,
+                'YUV', 
+                'Frame', 
+                'Intensity', 
+                ['Y', 'U', 'V'], 
+                f'{output_path}/yuv.png')
     
     create_plot(None, 
                 rgb_ma_filtered[..., 1],
@@ -111,6 +147,13 @@ def process_video(path):
                 'Intensity', 
                 ['Green_Filtered_MA'], 
                 f'{output_path}/g_ma_filtered.png')
+    create_plot(None, 
+                yuv_ma_filtered[..., 0],
+                'Filtered Magnified Y', 
+                'Frame', 
+                'Intensity', 
+                ['Y_Filtered_MA'], 
+                f'{output_path}/y_ma_filtered.png')
 
     create_plot(None, 
                 rgb_ma,
@@ -119,6 +162,13 @@ def process_video(path):
                 'Intensity', 
                 ['Blue_MA', 'Green_MA', 'Red_MA'], 
                 f'{output_path}/rgb_ma.png')
+    create_plot(None, 
+                yuv_ma,
+                'Magnified Colour MA YUV', 
+                'Frame', 
+                'Intensity', 
+                ['Y_MA', 'U_MA', 'V_MA'], 
+                f'{output_path}/yuv_ma.png')
     
     create_plot(None, 
                 rgb_ma_filtered,
@@ -127,6 +177,13 @@ def process_video(path):
                 'Intensity', 
                 ['Blue_Filtered_MA', 'Green_Filtered_MA', 'Red_Filtered_MA'], 
                 f'{output_path}/rgb_ma_filtered.png')
+    create_plot(None, 
+                yuv_ma_filtered,
+                'Filtered Magnified Colour MA YUV', 
+                'Frame', 
+                'Intensity', 
+                ['Y_Filtered_MA', 'U_Filtered_MA', 'V_Filtered_MA'], 
+                f'{output_path}/yuv_ma_filtered.png')
     
 # region Setup
 def setup():
@@ -169,7 +226,8 @@ def extract_avg_rgb(video_path):
     fps = cap.get(cv2.CAP_PROP_FPS)
     print(f"Processing video: {video_path}")
     print(f"Total frames: {total_frames}, FPS: {fps}")
-    avgs = []
+    avgs_rgb = []
+    avgs_yuv = []
     face_cascade = CascadeClassifier(haarcascades + "haarcascade_frontalface_default.xml")
     
     with tqdm(total=total_frames, desc="Processing video") as pbar:
@@ -179,20 +237,24 @@ def extract_avg_rgb(video_path):
                 break
             face = locate_face(frame, face_cascade)
             if face is not None:
-                avgs.append(avg(frame[face[1]:face[1]+face[3], face[0]:face[0]+face[2]]))
+                avgs_rgb.append(avg(frame[face[1]:face[1]+face[3], face[0]:face[0]+face[2]]))
+                avgs_yuv.append(avg(cv2.cvtColor(frame[face[1]:face[1]+face[3], face[0]:face[0]+face[2]], cv2.COLOR_BGR2YUV)))
                 del face
             del frame
             pbar.update(1)
     cap.release()
-    return np.array(avgs), fps
+    return np.array(avgs_rgb), np.array(avgs_yuv), fps
 
 def locate_face(frame, face_cascade):
+    scale = 0.5
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+    small = cv2.resize(gray, None, fx=scale, fy=scale)
+    faces = face_cascade.detectMultiScale(small, scaleFactor=1.1, minNeighbors=3)
     
     if len(faces) == 0:
         return
-    return faces[0]
+    x, y, w, h = faces[0]
+    return (int(x/scale), int(y/scale), int(w/scale), int(h/scale))
 
 def avg(frame):
     h, w = frame.shape[:2]
